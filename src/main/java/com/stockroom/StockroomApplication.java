@@ -398,13 +398,16 @@ public final class StockroomApplication {
     }
 
     private static String runTesseract(Path file,int pageSegmentationMode)throws Exception{
+        Path output=Files.createTempFile("stockroom-ocr-", ".txt");
         Process process;
-        try{process=new ProcessBuilder("tesseract",file.toString(),"stdout","-l","eng","--psm",String.valueOf(pageSegmentationMode)).redirectErrorStream(true).start();}
-        catch(IOException e){throw new IllegalStateException("Expiry scanning is temporarily unavailable. Please enter the date manually.",e);}
-        if(!process.waitFor(20,TimeUnit.SECONDS)){process.destroyForcibly();throw new IllegalArgumentException("The label scan took too long. Try a smaller, clearer photo.");}
-        byte[] output;try(InputStream stream=process.getInputStream()){output=stream.readAllBytes();}
-        if(process.exitValue()!=0)throw new IllegalArgumentException("Could not read this photo. Try a sharper, well-lit label.");
-        return new String(output,StandardCharsets.UTF_8).trim();
+        try{process=new ProcessBuilder("tesseract",file.toString(),"stdout","-l","eng","--psm",String.valueOf(pageSegmentationMode)).redirectErrorStream(true).redirectOutput(output.toFile()).start();}
+        catch(IOException e){Files.deleteIfExists(output);throw new IllegalStateException("Expiry scanning is temporarily unavailable. Please enter the date manually.",e);}
+        try{
+            if(!process.waitFor(12,TimeUnit.SECONDS)){process.destroyForcibly();process.waitFor(2,TimeUnit.SECONDS);throw new IllegalArgumentException("The label scan took too long. Try a smaller, clearer photo.");}
+            String recognized;try(InputStream stream=Files.newInputStream(output)){recognized=new String(stream.readNBytes(256*1024),StandardCharsets.UTF_8).trim();}
+            if(process.exitValue()!=0)throw new IllegalArgumentException("Could not read this photo. Try a sharper, well-lit label.");
+            return recognized;
+        }finally{Files.deleteIfExists(output);}
     }
 
     private static String extractExpiryDate(String text){

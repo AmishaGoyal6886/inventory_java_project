@@ -376,14 +376,15 @@ public final class StockroomApplication {
         String boundary=type.substring(type.indexOf("boundary=")+9).trim();if(boundary.startsWith("\""))boundary=boundary.substring(1,boundary.length()-1);
         byte[] raw;try(InputStream in=ex.getRequestBody()){raw=in.readNBytes(8*1024*1024+1);}
         if(raw.length>8*1024*1024)throw new IllegalArgumentException("Choose an image smaller than 8 MB");
-        String payload=new String(raw,StandardCharsets.ISO_8859_1),delimiter="--"+boundary;byte[] image=null;
+        String payload=new String(raw,StandardCharsets.ISO_8859_1),delimiter="--"+boundary;byte[] image=null;String imageSuffix=".img";
         for(String part:payload.split(Pattern.quote(delimiter))){
             int headersEnd=part.indexOf("\r\n\r\n");if(headersEnd<0||!part.substring(0,headersEnd).contains("name=\"image\""))continue;
+            java.util.regex.Matcher filename=Pattern.compile("(?i)filename=\"[^\"]*\\.(png|jpe?g|webp|tiff?|bmp)\"").matcher(part.substring(0,headersEnd));if(filename.find())imageSuffix="."+filename.group(1).toLowerCase(Locale.ROOT);
             int start=headersEnd+4,end=part.lastIndexOf("\r\n");if(end<start)continue;
             image=part.substring(start,end).getBytes(StandardCharsets.ISO_8859_1);break;
         }
         if(image==null||image.length==0)throw new IllegalArgumentException("The uploaded image was empty");
-        Path file=Files.createTempFile("stockroom-label-",".img");
+        Path file=Files.createTempFile("stockroom-label-",imageSuffix);
         try{
             Files.write(file,image);
             String recognized=runTesseract(file,6);

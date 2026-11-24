@@ -32,6 +32,12 @@ public final class StockroomApplication {
     private static final int PASSWORD_ITERATIONS = 160_000;
     private static final int SESSION_DAYS = 7;
     private static final String SESSION_COOKIE = "stockroom_session";
+    private static final Pattern EXPIRY_LABEL = Pattern.compile("(?i)\\b(?:EXP(?:IRY|IRATION)?|BEST\\s*BEFORE|USE\\s*BY|VALID\\s*(?:UNTIL|TILL)|BBE)\\b");
+    private static final Pattern ISO_EXPIRY = Pattern.compile("(?<!\\d)(20\\d{2})\\s*[-/.]\\s*(0?[1-9]|1[0-2])\\s*[-/.]\\s*(0?[1-9]|[12]\\d|3[01])(?!\\d)");
+    private static final Pattern DAY_MONTH_YEAR = Pattern.compile("(?<!\\d)(0?[1-9]|[12]\\d|3[01])\\s*[-/.]\\s*(0?[1-9]|1[0-2])\\s*[-/.]\\s*(20\\d{2}|\\d{2})(?!\\d)");
+    private static final Pattern MONTH_YEAR = Pattern.compile("(?<!\\d)(0?[1-9]|1[0-2])\\s*[-/.]\\s*(20\\d{2}|\\d{2})(?!\\d)");
+    private static final Pattern MONTH_NAME_YEAR = Pattern.compile("(?i)\\b(JAN(?:UARY)?|FEB(?:RUARY)?|MAR(?:CH)?|APR(?:IL)?|MAY|JUN(?:E)?|JUL(?:Y)?|AUG(?:UST)?|SEP(?:TEMBER)?|OCT(?:OBER)?|NOV(?:EMBER)?|DEC(?:EMBER)?)\\s*[,./-]?\\s*(20\\d{2}|\\d{2})\\b");
+    private static final Pattern DAY_MONTH_NAME_YEAR = Pattern.compile("(?i)\\b(0?[1-9]|[12]\\d|3[01])\\s+(JAN(?:UARY)?|FEB(?:RUARY)?|MAR(?:CH)?|APR(?:IL)?|MAY|JUN(?:E)?|JUL(?:Y)?|AUG(?:UST)?|SEP(?:TEMBER)?|OCT(?:OBER)?|NOV(?:EMBER)?|DEC(?:EMBER)?)\\s+(20\\d{2}|\\d{2})\\b");
     private static String dbUrl, dbUser, dbPassword;
 
     private record Identity(long userId, long storeId, String name, String email,
@@ -380,27 +386,58 @@ public final class StockroomApplication {
         Path file=Files.createTempFile("stockroom-label-",".img");
         try{
             Files.write(file,image);
-            Process process;
-            try{process=new ProcessBuilder("tesseract",file.toString(),"stdout","-l","eng","--psm","6").redirectErrorStream(true).start();}
-            catch(IOException e){throw new IllegalStateException("OCR is unavailable on this server",e);}
-            if(!process.waitFor(20,TimeUnit.SECONDS)){process.destroyForcibly();throw new IllegalArgumentException("The label scan took too long. Try a clearer photo");}
-            byte[] output;try(InputStream stream=process.getInputStream()){output=stream.readAllBytes();}
-            String recognized=new String(output,StandardCharsets.UTF_8);String date=extractExpiryDate(recognized);
+            String recognized=runTesseract(file,6);
+            String date=extractExpiryDate(recognized);
+            if(date.isEmpty()){
+                String secondPass=runTesseract(file,11);
+                if(!secondPass.isBlank()&&!secondPass.equals(recognized))recognized=recognized+"\n"+secondPass;
+                date=extractExpiryDate(recognized);
+            }
             Map<String,String> result=new LinkedHashMap<>();result.put("date",date);result.put("text",recognized.length()>600?recognized.substring(0,600):recognized);send(ex,200,result);
         }finally{Files.deleteIfExists(file);}
     }
+
+    private static String runTesseract(Path file,int pageSegmentationMode)throws Exception{
+        Process process;
+        try{process=new ProcessBuilder("tesseract",file.toString(),"stdout","-l","eng","--psm",String.valueOf(pageSegmentationMode)).redirectErrorStream(true).start();}
+        catch(IOException e){throw new IllegalStateException("Expiry scanning is temporarily unavailable. Please enter the date manually.",e);}
+        if(!process.waitFor(20,TimeUnit.SECONDS)){process.destroyForcibly();throw new IllegalArgumentException("The label scan took too long. Try a smaller, clearer photo.");}
+        byte[] output;try(InputStream stream=process.getInputStream()){output=stream.readAllBytes();}
+        if(process.exitValue()!=0)throw new IllegalArgumentException("Could not read this photo. Try a sharper, well-lit label.");
+        return new String(output,StandardCharsets.UTF_8).trim();
+    }
+
     private static String extractExpiryDate(String text){
-        Pattern[] patterns={
-                Pattern.compile("(?i)(?:EXP(?:IRY)?|BEST\\s*BEFORE|USE\\s*BY)\\D{0,16}(20\\d{2})[-/.](0?[1-9]|1[0-2])[-/.](0?[1-9]|[12]\\d|3[01])"),
-                Pattern.compile("(?i)(?:EXP(?:IRY)?|BEST\\s*BEFORE|USE\\s*BY)\\D{0,16}(0?[1-9]|[12]\\d|3[01])[-/.](0?[1-9]|1[0-2])[-/.](20\\d{2})"),
-                Pattern.compile("(?i)(?:EXP(?:IRY)?|BEST\\s*BEFORE|USE\\s*BY)\\D{0,16}(0?[1-9]|1[0-2])[-/.](20\\d{2})")
-        };
-        for(int i=0;i<patterns.length;i++){java.util.regex.Matcher m=patterns[i].matcher(text);if(!m.find())continue;try{
-            int year,month,day;if(i==0){year=Integer.parseInt(m.group(1));month=Integer.parseInt(m.group(2));day=Integer.parseInt(m.group(3));}else if(i==1){day=Integer.parseInt(m.group(1));month=Integer.parseInt(m.group(2));year=Integer.parseInt(m.group(3));}else{month=Integer.parseInt(m.group(1));year=Integer.parseInt(m.group(2));day=LocalDate.of(year,month,1).lengthOfMonth();}
-            return LocalDate.of(year,month,day).toString();
-        }catch(RuntimeException ignored){}}
+        if(text==null||text.isBlank())return "";
+        String[] lines=text.replace('\r','\n').split("\\n");
+        for(int i=0;i<lines.length;i++){
+            java.util.regex.Matcher label=EXPIRY_LABEL.matcher(lines[i]);
+            if(!label.find())continue;
+            StringBuilder context=new StringBuilder(lines[i].substring(label.end()));
+            for(int next=i+1;next<lines.length&&next<=i+2;next++)context.append(' ').append(lines[next]);
+            String date=findDate(context.toString());if(!date.isEmpty())return date;
+        }
         return "";
     }
+
+    private static String findDate(String text){
+        java.util.regex.Matcher match=ISO_EXPIRY.matcher(text);
+        while(match.find()){String date=makeDate(Integer.parseInt(match.group(1)),Integer.parseInt(match.group(2)),Integer.parseInt(match.group(3)));if(!date.isEmpty())return date;}
+        match=DAY_MONTH_YEAR.matcher(text);
+        while(match.find()){int year=expiryYear(match.group(3));String date=makeDate(year,Integer.parseInt(match.group(2)),Integer.parseInt(match.group(1)));if(!date.isEmpty())return date;}
+        match=MONTH_YEAR.matcher(text);
+        while(match.find()){int year=expiryYear(match.group(2)),month=Integer.parseInt(match.group(1));String date=monthEnd(year,month);if(!date.isEmpty())return date;}
+        match=DAY_MONTH_NAME_YEAR.matcher(text);
+        while(match.find()){String date=makeDate(expiryYear(match.group(3)),monthNumber(match.group(2)),Integer.parseInt(match.group(1)));if(!date.isEmpty())return date;}
+        match=MONTH_NAME_YEAR.matcher(text);
+        while(match.find()){String date=monthEnd(expiryYear(match.group(2)),monthNumber(match.group(1)));if(!date.isEmpty())return date;}
+        return "";
+    }
+
+    private static int expiryYear(String year){int value=Integer.parseInt(year);if(year.length()==2)return value<80?2000+value:1900+value;return value;}
+    private static String makeDate(int year,int month,int day){try{return LocalDate.of(year,month,day).toString();}catch(RuntimeException ignored){return "";}}
+    private static String monthEnd(int year,int month){try{return LocalDate.of(year,month,1).withDayOfMonth(LocalDate.of(year,month,1).lengthOfMonth()).toString();}catch(RuntimeException ignored){return "";}}
+    private static int monthNumber(String month){String m=month.toUpperCase(Locale.ROOT);if(m.startsWith("JAN"))return 1;if(m.startsWith("FEB"))return 2;if(m.startsWith("MAR"))return 3;if(m.startsWith("APR"))return 4;if(m.equals("MAY"))return 5;if(m.startsWith("JUN"))return 6;if(m.startsWith("JUL"))return 7;if(m.startsWith("AUG"))return 8;if(m.startsWith("SEP"))return 9;if(m.startsWith("OCT"))return 10;if(m.startsWith("NOV"))return 11;return 12;}
     private static void servePage(HttpExchange ex)throws IOException{
         String path=ex.getRequestURI().getPath();
         if(path.equals("/")||path.equals("/index.html")){sendHtml(ex,200,"<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Stockroom</title></head><body><div id=\"app\"></div><script src=\"/gwt/stockroom/stockroom.nocache.js\"></script></body></html>");return;}

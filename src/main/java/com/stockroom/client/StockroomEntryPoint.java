@@ -35,6 +35,7 @@ import com.google.gwt.dom.client.StyleInjector;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.Locale;
 
 public final class StockroomEntryPoint implements EntryPoint {
     private final RootPanel root = RootPanel.get();

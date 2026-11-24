@@ -11,8 +11,6 @@ import javax.crypto.spec.PBEKeySpec;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigDecimal;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -22,7 +20,6 @@ import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
 public final class StockroomApplication {
@@ -32,12 +29,6 @@ public final class StockroomApplication {
     private static final int PASSWORD_ITERATIONS = 160_000;
     private static final int SESSION_DAYS = 7;
     private static final String SESSION_COOKIE = "stockroom_session";
-    private static final Pattern EXPIRY_LABEL = Pattern.compile("(?i)\\b(?:EXP(?:IRY|IRATION)?|BEST\\s*BEFORE|USE\\s*BY|VALID\\s*(?:UNTIL|TILL)|BBE)\\b");
-    private static final Pattern ISO_EXPIRY = Pattern.compile("(?<!\\d)(20\\d{2})\\s*[-/.]\\s*(0?[1-9]|1[0-2])\\s*[-/.]\\s*(0?[1-9]|[12]\\d|3[01])(?!\\d)");
-    private static final Pattern DAY_MONTH_YEAR = Pattern.compile("(?<!\\d)(0?[1-9]|[12]\\d|3[01])\\s*[-/.]\\s*(0?[1-9]|1[0-2])\\s*[-/.]\\s*(20\\d{2}|\\d{2})(?!\\d)");
-    private static final Pattern MONTH_YEAR = Pattern.compile("(?<!\\d)(0?[1-9]|1[0-2])\\s*[-/.]\\s*(20\\d{2}|\\d{2})(?!\\d)");
-    private static final Pattern MONTH_NAME_YEAR = Pattern.compile("(?i)\\b(JAN(?:UARY)?|FEB(?:RUARY)?|MAR(?:CH)?|APR(?:IL)?|MAY|JUN(?:E)?|JUL(?:Y)?|AUG(?:UST)?|SEP(?:TEMBER)?|OCT(?:OBER)?|NOV(?:EMBER)?|DEC(?:EMBER)?)\\s*[,./-]?\\s*(20\\d{2}|\\d{2})\\b");
-    private static final Pattern DAY_MONTH_NAME_YEAR = Pattern.compile("(?i)\\b(0?[1-9]|[12]\\d|3[01])\\s+(JAN(?:UARY)?|FEB(?:RUARY)?|MAR(?:CH)?|APR(?:IL)?|MAY|JUN(?:E)?|JUL(?:Y)?|AUG(?:UST)?|SEP(?:TEMBER)?|OCT(?:OBER)?|NOV(?:EMBER)?|DEC(?:EMBER)?)\\s+(20\\d{2}|\\d{2})\\b");
     private static String dbUrl, dbUser, dbPassword;
 
     private record Identity(long userId, long storeId, String name, String email,
@@ -121,8 +112,6 @@ public final class StockroomApplication {
             if (path.equals("/api/auth/login") && method.equals("POST")) { login(ex); return; }
             if (path.equals("/api/auth/logout") && method.equals("POST")) { logout(ex); return; }
             if (path.equals("/api/auth/me") && method.equals("GET")) { send(ex, 200, identityMap(requireIdentity(ex))); return; }
-            if (path.equals("/api/ocr/expiry") && method.equals("POST")) { requireIdentity(ex); recognizeExpiry(ex); return; }
-
             Identity identity = requireIdentity(ex);
             if (path.equals("/api/auth/profile") && method.equals("PUT")) { updateProfile(ex, identity); return; }
             if (path.equals("/api/store") && method.equals("PUT")) { updateStore(ex, identity); return; }
@@ -137,13 +126,13 @@ public final class StockroomApplication {
             if (path.equals("/api/settings") && method.equals("PUT")) { updateSettings(ex, identity); return; }
             send(ex, 404, Map.of("error", "API endpoint not found"));
         } catch (Unauthenticated e) {
-            sendApiError(ex, 401, Map.of("error", "Sign in to continue", "code", "AUTH_REQUIRED"));
+            send(ex, 401, Map.of("error", "Sign in to continue", "code", "AUTH_REQUIRED"));
         } catch (IllegalArgumentException e) {
-            sendApiError(ex, 400, Map.of("error", e.getMessage()));
+            send(ex, 400, Map.of("error", e.getMessage()));
         } catch (SQLException e) {
-            e.printStackTrace(); sendApiError(ex, 500, Map.of("error", "Database operation failed"));
+            e.printStackTrace(); send(ex, 500, Map.of("error", "Database operation failed"));
         } catch (Exception e) {
-            e.printStackTrace(); sendApiError(ex, 500, Map.of("error", "Unexpected server error"));
+            e.printStackTrace(); send(ex, 500, Map.of("error", "Unexpected server error"));
         }
     }
 
@@ -370,78 +359,6 @@ public final class StockroomApplication {
         send(ex,201,readSales(identity.storeId()));
     }
 
-    private static void recognizeExpiry(HttpExchange ex)throws Exception{
-        String type=ex.getRequestHeaders().getFirst("Content-Type");
-        if(type==null||!type.toLowerCase(Locale.ROOT).startsWith("multipart/form-data")||!type.contains("boundary="))throw new IllegalArgumentException("Upload a product label image to scan");
-        String boundary=type.substring(type.indexOf("boundary=")+9).trim();if(boundary.startsWith("\""))boundary=boundary.substring(1,boundary.length()-1);
-        byte[] raw;try(InputStream in=ex.getRequestBody()){raw=in.readNBytes(8*1024*1024+1);}
-        if(raw.length>8*1024*1024)throw new IllegalArgumentException("Choose an image smaller than 8 MB");
-        String payload=new String(raw,StandardCharsets.ISO_8859_1),delimiter="--"+boundary;byte[] image=null;String imageSuffix=".img";
-        for(String part:payload.split(Pattern.quote(delimiter))){
-            int headersEnd=part.indexOf("\r\n\r\n");if(headersEnd<0||!part.substring(0,headersEnd).contains("name=\"image\""))continue;
-            java.util.regex.Matcher filename=Pattern.compile("(?i)filename=\"[^\"]*\\.(png|jpe?g|webp|tiff?|bmp)\"").matcher(part.substring(0,headersEnd));if(filename.find())imageSuffix="."+filename.group(1).toLowerCase(Locale.ROOT);
-            int start=headersEnd+4,end=part.lastIndexOf("\r\n");if(end<start)continue;
-            image=part.substring(start,end).getBytes(StandardCharsets.ISO_8859_1);break;
-        }
-        if(image==null||image.length==0)throw new IllegalArgumentException("The uploaded image was empty");
-        Path file=Files.createTempFile("stockroom-label-",imageSuffix);
-        try{
-            Files.write(file,image);
-            String recognized=runTesseract(file,6);
-            String date=extractExpiryDate(recognized);
-            if(date.isEmpty()){
-                String secondPass=runTesseract(file,11);
-                if(!secondPass.isBlank()&&!secondPass.equals(recognized))recognized=recognized+"\n"+secondPass;
-                date=extractExpiryDate(recognized);
-            }
-            Map<String,String> result=new LinkedHashMap<>();result.put("date",date);result.put("text",recognized.length()>600?recognized.substring(0,600):recognized);sendOcr(ex,200,result);
-        }finally{Files.deleteIfExists(file);}
-    }
-
-    private static String runTesseract(Path file,int pageSegmentationMode)throws Exception{
-        Path output=Files.createTempFile("stockroom-ocr-", ".txt");
-        Process process;
-        try{process=new ProcessBuilder("tesseract",file.toString(),"stdout","-l","eng","--psm",String.valueOf(pageSegmentationMode)).redirectErrorStream(true).redirectOutput(output.toFile()).start();}
-        catch(IOException e){Files.deleteIfExists(output);throw new IllegalStateException("Expiry scanning is temporarily unavailable. Please enter the date manually.",e);}
-        try{
-            if(!process.waitFor(12,TimeUnit.SECONDS)){process.destroyForcibly();process.waitFor(2,TimeUnit.SECONDS);throw new IllegalArgumentException("The label scan took too long. Try a smaller, clearer photo.");}
-            String recognized;try(InputStream stream=Files.newInputStream(output)){recognized=new String(stream.readNBytes(256*1024),StandardCharsets.UTF_8).trim();}
-            if(process.exitValue()!=0)throw new IllegalArgumentException("Could not read this photo. Try a sharper, well-lit label.");
-            return recognized;
-        }finally{Files.deleteIfExists(output);}
-    }
-
-    private static String extractExpiryDate(String text){
-        if(text==null||text.isBlank())return "";
-        String[] lines=text.replace('\r','\n').split("\\n");
-        for(int i=0;i<lines.length;i++){
-            java.util.regex.Matcher label=EXPIRY_LABEL.matcher(lines[i]);
-            if(!label.find())continue;
-            StringBuilder context=new StringBuilder(lines[i].substring(label.end()));
-            for(int next=i+1;next<lines.length&&next<=i+2;next++)context.append(' ').append(lines[next]);
-            String date=findDate(context.toString());if(!date.isEmpty())return date;
-        }
-        return "";
-    }
-
-    private static String findDate(String text){
-        java.util.regex.Matcher match=ISO_EXPIRY.matcher(text);
-        while(match.find()){String date=makeDate(Integer.parseInt(match.group(1)),Integer.parseInt(match.group(2)),Integer.parseInt(match.group(3)));if(!date.isEmpty())return date;}
-        match=DAY_MONTH_YEAR.matcher(text);
-        while(match.find()){int year=expiryYear(match.group(3));String date=makeDate(year,Integer.parseInt(match.group(2)),Integer.parseInt(match.group(1)));if(!date.isEmpty())return date;}
-        match=MONTH_YEAR.matcher(text);
-        while(match.find()){int year=expiryYear(match.group(2)),month=Integer.parseInt(match.group(1));String date=monthEnd(year,month);if(!date.isEmpty())return date;}
-        match=DAY_MONTH_NAME_YEAR.matcher(text);
-        while(match.find()){String date=makeDate(expiryYear(match.group(3)),monthNumber(match.group(2)),Integer.parseInt(match.group(1)));if(!date.isEmpty())return date;}
-        match=MONTH_NAME_YEAR.matcher(text);
-        while(match.find()){String date=monthEnd(expiryYear(match.group(2)),monthNumber(match.group(1)));if(!date.isEmpty())return date;}
-        return "";
-    }
-
-    private static int expiryYear(String year){int value=Integer.parseInt(year);if(year.length()==2)return value<80?2000+value:1900+value;return value;}
-    private static String makeDate(int year,int month,int day){try{return LocalDate.of(year,month,day).toString();}catch(RuntimeException ignored){return "";}}
-    private static String monthEnd(int year,int month){try{return LocalDate.of(year,month,1).withDayOfMonth(LocalDate.of(year,month,1).lengthOfMonth()).toString();}catch(RuntimeException ignored){return "";}}
-    private static int monthNumber(String month){String m=month.toUpperCase(Locale.ROOT);if(m.startsWith("JAN"))return 1;if(m.startsWith("FEB"))return 2;if(m.startsWith("MAR"))return 3;if(m.startsWith("APR"))return 4;if(m.equals("MAY"))return 5;if(m.startsWith("JUN"))return 6;if(m.startsWith("JUL"))return 7;if(m.startsWith("AUG"))return 8;if(m.startsWith("SEP"))return 9;if(m.startsWith("OCT"))return 10;if(m.startsWith("NOV"))return 11;return 12;}
     private static void servePage(HttpExchange ex)throws IOException{
         String path=ex.getRequestURI().getPath();
         if(path.equals("/")||path.equals("/index.html")){sendHtml(ex,200,"<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Stockroom</title></head><body><div id=\"app\"></div><script src=\"/gwt/stockroom/stockroom.nocache.js\"></script></body></html>");return;}
@@ -449,8 +366,6 @@ public final class StockroomApplication {
         try(InputStream in=StockroomApplication.class.getResourceAsStream("/public"+path)){if(in==null){send(ex,404,Map.of("error","Page not found"));return;}byte[] data=in.readAllBytes();String type=path.endsWith(".js")?"text/javascript":path.endsWith(".css")?"text/css":path.endsWith(".svg")?"image/svg+xml":"application/octet-stream";ex.getResponseHeaders().set("Content-Type",type);ex.getResponseHeaders().set("Cache-Control",path.contains("nocache")?"no-cache":"public, max-age=31536000, immutable");ex.sendResponseHeaders(200,data.length);ex.getResponseBody().write(data);}finally{ex.close();}
     }
     private static void sendHtml(HttpExchange ex,int code,String page)throws IOException{byte[] bytes=page.getBytes(StandardCharsets.UTF_8);ex.getResponseHeaders().set("Content-Type","text/html; charset=utf-8");ex.getResponseHeaders().set("Cache-Control","no-store");ex.sendResponseHeaders(code,bytes.length);ex.getResponseBody().write(bytes);ex.close();}
-    private static void sendApiError(HttpExchange ex,int code,Object payload)throws IOException{if(ex.getRequestURI().getPath().equals("/api/ocr/expiry")){sendOcr(ex,code,payload);return;}send(ex,code,payload);}
-    private static void sendOcr(HttpExchange ex,int code,Object payload)throws IOException{String json=JSON.toJson(payload);String html=json.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace("\"","&quot;").replace("'","&#39;");sendHtml(ex,code,"<!doctype html><html><head><meta charset=\"utf-8\"></head><body><pre>"+html+"</pre></body></html>");}
     private static void send(HttpExchange ex,int code,Object payload)throws IOException{
         byte[] bytes=JSON.toJson(payload).getBytes(StandardCharsets.UTF_8);ex.getResponseHeaders().set("Content-Type","application/json; charset=utf-8");ex.getResponseHeaders().set("Cache-Control","no-store");ex.sendResponseHeaders(code,bytes.length);ex.getResponseBody().write(bytes);ex.close();
     }

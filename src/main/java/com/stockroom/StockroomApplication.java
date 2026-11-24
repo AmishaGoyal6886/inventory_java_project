@@ -137,13 +137,13 @@ public final class StockroomApplication {
             if (path.equals("/api/settings") && method.equals("PUT")) { updateSettings(ex, identity); return; }
             send(ex, 404, Map.of("error", "API endpoint not found"));
         } catch (Unauthenticated e) {
-            send(ex, 401, Map.of("error", "Sign in to continue", "code", "AUTH_REQUIRED"));
+            sendApiError(ex, 401, Map.of("error", "Sign in to continue", "code", "AUTH_REQUIRED"));
         } catch (IllegalArgumentException e) {
-            send(ex, 400, Map.of("error", e.getMessage()));
+            sendApiError(ex, 400, Map.of("error", e.getMessage()));
         } catch (SQLException e) {
-            e.printStackTrace(); send(ex, 500, Map.of("error", "Database operation failed"));
+            e.printStackTrace(); sendApiError(ex, 500, Map.of("error", "Database operation failed"));
         } catch (Exception e) {
-            e.printStackTrace(); send(ex, 500, Map.of("error", "Unexpected server error"));
+            e.printStackTrace(); sendApiError(ex, 500, Map.of("error", "Unexpected server error"));
         }
     }
 
@@ -393,7 +393,7 @@ public final class StockroomApplication {
                 if(!secondPass.isBlank()&&!secondPass.equals(recognized))recognized=recognized+"\n"+secondPass;
                 date=extractExpiryDate(recognized);
             }
-            Map<String,String> result=new LinkedHashMap<>();result.put("date",date);result.put("text",recognized.length()>600?recognized.substring(0,600):recognized);send(ex,200,result);
+            Map<String,String> result=new LinkedHashMap<>();result.put("date",date);result.put("text",recognized.length()>600?recognized.substring(0,600):recognized);sendOcr(ex,200,result);
         }finally{Files.deleteIfExists(file);}
     }
 
@@ -445,6 +445,8 @@ public final class StockroomApplication {
         try(InputStream in=StockroomApplication.class.getResourceAsStream("/public"+path)){if(in==null){send(ex,404,Map.of("error","Page not found"));return;}byte[] data=in.readAllBytes();String type=path.endsWith(".js")?"text/javascript":path.endsWith(".css")?"text/css":path.endsWith(".svg")?"image/svg+xml":"application/octet-stream";ex.getResponseHeaders().set("Content-Type",type);ex.getResponseHeaders().set("Cache-Control",path.contains("nocache")?"no-cache":"public, max-age=31536000, immutable");ex.sendResponseHeaders(200,data.length);ex.getResponseBody().write(data);}finally{ex.close();}
     }
     private static void sendHtml(HttpExchange ex,int code,String page)throws IOException{byte[] bytes=page.getBytes(StandardCharsets.UTF_8);ex.getResponseHeaders().set("Content-Type","text/html; charset=utf-8");ex.getResponseHeaders().set("Cache-Control","no-store");ex.sendResponseHeaders(code,bytes.length);ex.getResponseBody().write(bytes);ex.close();}
+    private static void sendApiError(HttpExchange ex,int code,Object payload)throws IOException{if(ex.getRequestURI().getPath().equals("/api/ocr/expiry")){sendOcr(ex,code,payload);return;}send(ex,code,payload);}
+    private static void sendOcr(HttpExchange ex,int code,Object payload)throws IOException{String json=JSON.toJson(payload);String html=json.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace("\"","&quot;").replace("'","&#39;");sendHtml(ex,code,"<!doctype html><html><head><meta charset=\"utf-8\"></head><body><pre>"+html+"</pre></body></html>");}
     private static void send(HttpExchange ex,int code,Object payload)throws IOException{
         byte[] bytes=JSON.toJson(payload).getBytes(StandardCharsets.UTF_8);ex.getResponseHeaders().set("Content-Type","application/json; charset=utf-8");ex.getResponseHeaders().set("Cache-Control","no-store");ex.sendResponseHeaders(code,bytes.length);ex.getResponseBody().write(bytes);ex.close();
     }

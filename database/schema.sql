@@ -1,0 +1,68 @@
+CREATE DATABASE IF NOT EXISTS stockroom CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE stockroom;
+
+CREATE TABLE IF NOT EXISTS stores (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(160) NOT NULL,
+  location VARCHAR(200) NOT NULL DEFAULT '',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS users (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  store_id BIGINT NOT NULL,
+  name VARCHAR(160) NOT NULL,
+  email VARCHAR(254) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  role VARCHAR(40) NOT NULL DEFAULT 'Store owner',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_users_store FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  token_hash CHAR(64) PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  expires_at TIMESTAMP NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_sessions_expiry (expires_at),
+  CONSTRAINT fk_sessions_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS products (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  store_id BIGINT NOT NULL,
+  sku VARCHAR(40) NOT NULL,
+  name VARCHAR(160) NOT NULL,
+  category VARCHAR(60) NOT NULL,
+  price DECIMAL(12,2) NOT NULL DEFAULT 0,
+  stock INT NOT NULL DEFAULT 0,
+  expiry_date DATE NULL,
+  icon VARCHAR(12) NOT NULL DEFAULT '📦',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_products_store_sku (store_id, sku),
+  INDEX idx_products_expiry (store_id, expiry_date),
+  INDEX idx_products_category (store_id, category),
+  CONSTRAINT fk_products_store FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS suppliers (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  store_id BIGINT NOT NULL,
+  name VARCHAR(160) NOT NULL,
+  category VARCHAR(60) NOT NULL,
+  phone VARCHAR(40) NOT NULL DEFAULT '',
+  email VARCHAR(160) NOT NULL DEFAULT '',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_suppliers_store (store_id),
+  CONSTRAINT fk_suppliers_store FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS store_settings (
+  store_id BIGINT NOT NULL,
+  setting_key VARCHAR(80) NOT NULL,
+  setting_value TEXT NOT NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (store_id, setting_key),
+  CONSTRAINT fk_settings_store FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE
+);

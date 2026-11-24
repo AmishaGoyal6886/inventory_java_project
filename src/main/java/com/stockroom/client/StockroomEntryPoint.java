@@ -1,6 +1,7 @@
 package com.stockroom.client;
 
 import com.google.gwt.core.client.EntryPoint;
+import com.google.gwt.dom.client.Element;
 import com.google.gwt.dom.client.Style.Unit;
 import com.google.gwt.http.client.Request;
 import com.google.gwt.http.client.RequestBuilder;
@@ -22,7 +23,6 @@ import com.google.gwt.user.client.ui.DialogBox;
 import com.google.gwt.user.client.ui.FileUpload;
 import com.google.gwt.user.client.ui.FlexTable;
 import com.google.gwt.user.client.ui.FlowPanel;
-import com.google.gwt.user.client.ui.FormPanel;
 import com.google.gwt.user.client.ui.HorizontalPanel;
 import com.google.gwt.user.client.ui.Label;
 import com.google.gwt.user.client.ui.ListBox;
@@ -53,6 +53,11 @@ public final class StockroomEntryPoint implements EntryPoint {
     private Label notice;
     private TextBox search;
     private String searchQuery = "";
+    private TextBox ocrExpiryInput;
+    private Button ocrScanButton;
+    private Label ocrScanStatus;
+    private Timer ocrScanTimer;
+    private int ocrRequestId;
 
     @Override public void onModuleLoad() {
         installTheme();
@@ -214,9 +219,7 @@ public final class StockroomEntryPoint implements EntryPoint {
         final DialogBox dialog=new DialogBox();dialog.setText("Add a product");dialog.setStyleName("sr-dialog");VerticalPanel form=new VerticalPanel();form.setSpacing(7);form.setStyleName("sr-form");
         final TextBox name=field("Product name",form);final ListBox category=new ListBox();category.setStyleName("sr-form-field");category.setWidth("100%");styleInput(category);for(String c:new String[]{"Dairy","Produce","Bakery","Pantry","Other"})category.addItem(c);form.add(category);
         final TextBox price=field("Price (₹)",form),stock=field("Quantity in stock",form),expiry=field("Expiry date (YYYY-MM-DD)",form);
-        FormPanel scan=new FormPanel();scan.setAction("/api/ocr/expiry");scan.setMethod(FormPanel.METHOD_POST);scan.setEncoding(FormPanel.ENCODING_MULTIPART);
-        VerticalPanel scanPanel=new VerticalPanel();scanPanel.setSpacing(5);scanPanel.add(new Label("Scan an expiry date from a clear, well-lit label photo"));FileUpload image=new FileUpload();image.setName("image");image.getElement().setAttribute("accept","image/*");scanPanel.add(image);Button scanButton=new Button("Scan label");Label scanStatus=new Label("Choose a photo, then scan the printed expiry date.");scanStatus.setStyleName("sr-scan-status");Timer scanTimeout=new Timer(){public void run(){scanButton.setEnabled(true);scanStatus.setText("The scan timed out. Try a smaller photo or enter the date manually.");}};scanButton.addClickHandler(e->{if(image.getFilename().isEmpty()){toast("Choose a label photo first.");return;}scanButton.setEnabled(false);scanStatus.setText("Reading the label…");scanTimeout.schedule(30000);scan.submit();});scanPanel.add(scanButton);scanPanel.add(scanStatus);scan.setWidget(scanPanel);
-        scan.addSubmitCompleteHandler(e->{scanTimeout.cancel();scanButton.setEnabled(true);String result=e.getResults();String detected=extractOcrDate(result);String error=extractOcrError(result);if(!detected.isEmpty()){expiry.setValue(detected);scanStatus.setText("Date detected. Review it before saving.");toast("Detected expiry date: "+detected+" — please review it.");}else if(!error.isEmpty()){scanStatus.setText(error);toast(error);}else{scanStatus.setText("Could not identify an expiry date. Try a closer photo with EXP / Use by visible, or enter the date manually.");}});form.add(scan);
+        VerticalPanel scanPanel=new VerticalPanel();scanPanel.setSpacing(5);scanPanel.add(new Label("Scan an expiry date from a clear, well-lit label photo"));FileUpload image=new FileUpload();image.setName("image");image.getElement().setAttribute("accept","image/*");scanPanel.add(image);Button scanButton=new Button("Scan label");Label scanStatus=new Label("Choose a photo, then scan the printed expiry date.");scanStatus.setStyleName("sr-scan-status");ocrExpiryInput=expiry;ocrScanButton=scanButton;ocrScanStatus=scanStatus;scanButton.addClickHandler(e->{if(image.getFilename().isEmpty()){toast("Choose a label photo first.");return;}final int requestId=++ocrRequestId;scanButton.setEnabled(false);scanStatus.setText("Reading the label…");if(ocrScanTimer!=null)ocrScanTimer.cancel();ocrScanTimer=new Timer(){public void run(){if(requestId==ocrRequestId){scanButton.setEnabled(true);scanStatus.setText("The scan timed out. Try a smaller photo or enter the date manually.");}}};ocrScanTimer.schedule(33000);sendExpiryImage(image.getElement(),requestId);});scanPanel.add(scanButton);scanPanel.add(scanStatus);form.add(scanPanel);
         HorizontalPanel buttons=new HorizontalPanel();buttons.setSpacing(6);Button save=new Button("Save product");save.setStyleName("sr-primary-button");save.addClickHandler(e->{try{if(name.getValue().trim().isEmpty()||Double.parseDouble(price.getValue())<0||Integer.parseInt(stock.getValue())<0)throw new IllegalArgumentException();JSONObject body=new JSONObject();put(body,"name",name.getValue().trim());put(body,"category",category.getSelectedValue());body.put("price",new JSONNumber(Double.parseDouble(price.getValue())));body.put("stock",new JSONNumber(Integer.parseInt(stock.getValue())));put(body,"icon","📦");if(!expiry.getValue().trim().isEmpty())put(body,"expiry",expiry.getValue().trim());request("POST","/api/products",body.toString(),new ApiCallback(){public void success(JSONValue v){dialog.hide();loadProductsThen(StockroomEntryPoint.this::renderContent);toast("Product added.");}public void failure(String m){toast(m);}});}catch(Exception ex){toast("Enter a product name, a valid price and a whole-number quantity.");}});
         Button cancel=new Button("Cancel");cancel.addClickHandler(e->dialog.hide());buttons.add(save);buttons.add(cancel);form.add(buttons);dialog.setWidget(form);dialog.center();
     }
@@ -263,6 +266,20 @@ public final class StockroomEntryPoint implements EntryPoint {
     private String extractOcrDate(String response){String json=cleanOcrResponse(response);try{JSONObject body=JSONParser.parseStrict(json).isObject();if(body!=null){String date=text(body,"date","");if(date.matches("20\\d{2}-\\d{2}-\\d{2}"))return date;}}catch(Exception ignored){}return extractDate(json);}
     private String extractOcrError(String response){String json=cleanOcrResponse(response);try{JSONObject body=JSONParser.parseStrict(json).isObject();if(body!=null)return text(body,"error","");}catch(Exception ignored){}return "The label scan could not be completed. Please enter the expiry date manually.";}
     private String cleanOcrResponse(String response){if(response==null)return "";String clean=response.trim();if(clean.startsWith("<")){clean=clean.replaceAll("(?is)<[^>]*>"," ").replace("&quot;","\"").replace("&#39;","'").replace("&amp;","&");}return clean;}
+    private native void sendExpiryImage(Element input,int requestId) /*-{
+        var self=this;
+        var file=input.files&&input.files.length?input.files[0]:null;
+        if(!file){self.@com.stockroom.client.StockroomEntryPoint::finishOcrError(Ljava/lang/String;I)("Choose a label photo first.",requestId);return;}
+        var data=new FormData();data.append("image",file,file.name);
+        var xhr=new XMLHttpRequest();xhr.open("POST","/api/ocr/expiry",true);xhr.timeout=30000;
+        xhr.onload=function(){self.@com.stockroom.client.StockroomEntryPoint::finishOcrResponse(Ljava/lang/String;II)(xhr.responseText||"",xhr.status,requestId);};
+        xhr.onerror=function(){self.@com.stockroom.client.StockroomEntryPoint::finishOcrError(Ljava/lang/String;I)("Could not reach the expiry scanner. Check your connection and try again.",requestId);};
+        xhr.ontimeout=function(){self.@com.stockroom.client.StockroomEntryPoint::finishOcrError(Ljava/lang/String;I)("The scan took too long. Try a smaller photo or enter the date manually.",requestId);};
+        xhr.send(data);
+    }-*/;
+    private void finishOcrResponse(String response,int statusCode,int requestId){if(requestId!=ocrRequestId)return;finishOcrRequest();String detected=extractOcrDate(response),error=extractOcrError(response);if(statusCode>=200&&statusCode<300&&!detected.isEmpty()){ocrExpiryInput.setValue(detected);ocrScanStatus.setText("Date detected. Review it before saving.");toast("Detected expiry date: "+detected+" — please review it.");return;}if(!error.isEmpty()&&!(statusCode>=200&&statusCode<300)){ocrScanStatus.setText(error);toast(error);return;}String readable="";try{JSONObject body=JSONParser.parseStrict(cleanOcrResponse(response)).isObject();if(body!=null)readable=text(body,"text","");}catch(Exception ignored){}ocrScanStatus.setText(readable.isEmpty()?"Could not identify an expiry date. Try a closer photo with EXP / Use by visible, or enter the date manually.":"Label read: "+readable+" — expiry date not recognized. Enter it manually.");}
+    private void finishOcrError(String message,int requestId){if(requestId!=ocrRequestId)return;finishOcrRequest();ocrScanStatus.setText(message);toast(message);}
+    private void finishOcrRequest(){if(ocrScanTimer!=null)ocrScanTimer.cancel();if(ocrScanButton!=null)ocrScanButton.setEnabled(true);}
     private boolean digits(String x,int from,int to){for(int i=from;i<to;i++)if(x.charAt(i)<'0'||x.charAt(i)>'9')return false;return true;}
     private RequestBuilder.Method requestMethod(String name){if(name.equals("POST"))return RequestBuilder.POST;if(name.equals("PUT"))return RequestBuilder.PUT;if(name.equals("DELETE"))return RequestBuilder.DELETE;return RequestBuilder.GET;}
     private static void put(JSONObject o,String key,String value){o.put(key,new JSONString(value==null?"":value));}

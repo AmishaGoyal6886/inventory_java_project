@@ -1,2 +1,2 @@
 @echo off
-start "" "%~dp0index.html"
+call "%~dp0run.bat"

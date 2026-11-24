@@ -58,6 +58,20 @@ CREATE TABLE IF NOT EXISTS suppliers (
   CONSTRAINT fk_suppliers_store FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS sales (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  store_id BIGINT NOT NULL,
+  product_id BIGINT NULL,
+  product_name VARCHAR(160) NOT NULL,
+  units INT NOT NULL,
+  unit_price DECIMAL(12,2) NOT NULL,
+  amount DECIMAL(12,2) NOT NULL,
+  sold_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_sales_store_date (store_id, sold_at),
+  CONSTRAINT fk_sales_store FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE,
+  CONSTRAINT fk_sales_product FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS store_settings (
   store_id BIGINT NOT NULL,
   setting_key VARCHAR(80) NOT NULL,

@@ -10,6 +10,9 @@ import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.PBEKeySpec;
 import java.io.IOException;
 import java.io.InputStream;
+import java.math.BigDecimal;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -19,6 +22,7 @@ import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
 public final class StockroomApplication {
@@ -63,6 +67,7 @@ public final class StockroomApplication {
             s.executeUpdate("CREATE TABLE IF NOT EXISTS sessions (token_hash CHAR(64) PRIMARY KEY, user_id BIGINT NOT NULL, expires_at TIMESTAMP NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, INDEX idx_sessions_expiry (expires_at), CONSTRAINT fk_sessions_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)");
             s.executeUpdate("CREATE TABLE IF NOT EXISTS products (id BIGINT PRIMARY KEY AUTO_INCREMENT, store_id BIGINT NOT NULL, sku VARCHAR(40) NOT NULL, name VARCHAR(160) NOT NULL, category VARCHAR(60) NOT NULL, price DECIMAL(12,2) NOT NULL DEFAULT 0, stock INT NOT NULL DEFAULT 0, expiry_date DATE NULL, icon VARCHAR(12) NOT NULL DEFAULT '📦', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, UNIQUE KEY uq_products_store_sku (store_id, sku), INDEX idx_products_store (store_id), INDEX idx_products_expiry (store_id, expiry_date), INDEX idx_products_category (store_id, category), CONSTRAINT fk_products_store FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE)");
             s.executeUpdate("CREATE TABLE IF NOT EXISTS suppliers (id BIGINT PRIMARY KEY AUTO_INCREMENT, store_id BIGINT NOT NULL, name VARCHAR(160) NOT NULL, category VARCHAR(60) NOT NULL, phone VARCHAR(40) NOT NULL DEFAULT '', email VARCHAR(160) NOT NULL DEFAULT '', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, INDEX idx_suppliers_store (store_id), CONSTRAINT fk_suppliers_store FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE)");
+            s.executeUpdate("CREATE TABLE IF NOT EXISTS sales (id BIGINT PRIMARY KEY AUTO_INCREMENT, store_id BIGINT NOT NULL, product_id BIGINT NULL, product_name VARCHAR(160) NOT NULL, units INT NOT NULL, unit_price DECIMAL(12,2) NOT NULL, amount DECIMAL(12,2) NOT NULL, sold_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, INDEX idx_sales_store_date (store_id, sold_at), CONSTRAINT fk_sales_store FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE, CONSTRAINT fk_sales_product FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL)");
             s.executeUpdate("CREATE TABLE IF NOT EXISTS store_settings (store_id BIGINT NOT NULL, setting_key VARCHAR(80) NOT NULL, setting_value TEXT NOT NULL, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, PRIMARY KEY (store_id, setting_key), CONSTRAINT fk_settings_store FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE)");
         }
         migrateStoreColumn("products");
@@ -110,10 +115,13 @@ public final class StockroomApplication {
             if (path.equals("/api/auth/login") && method.equals("POST")) { login(ex); return; }
             if (path.equals("/api/auth/logout") && method.equals("POST")) { logout(ex); return; }
             if (path.equals("/api/auth/me") && method.equals("GET")) { send(ex, 200, identityMap(requireIdentity(ex))); return; }
+            if (path.equals("/api/ocr/expiry") && method.equals("POST")) { requireIdentity(ex); recognizeExpiry(ex); return; }
 
             Identity identity = requireIdentity(ex);
             if (path.equals("/api/auth/profile") && method.equals("PUT")) { updateProfile(ex, identity); return; }
             if (path.equals("/api/store") && method.equals("PUT")) { updateStore(ex, identity); return; }
+            if (path.equals("/api/sales") && method.equals("GET")) { send(ex, 200, readSales(identity.storeId())); return; }
+            if (path.equals("/api/sales") && method.equals("POST")) { recordSale(ex, identity); return; }
             if (path.equals("/api/products") || path.equals("/api/products/")) { products(ex, method, identity); return; }
             if (path.startsWith("/api/products/")) { productById(ex, method, path.substring("/api/products/".length()), identity); return; }
             if (path.equals("/api/suppliers") && method.equals("GET")) { send(ex, 200, readSuppliers(identity.storeId())); return; }
@@ -205,7 +213,7 @@ public final class StockroomApplication {
         try (Connection c = connection(); PreparedStatement s = c.prepareStatement("UPDATE users SET name=?,email=? WHERE id=?")) {
             s.setString(1, name); s.setString(2, email); s.setLong(3, identity.userId()); s.executeUpdate();
         } catch (SQLException e) { if (e.getErrorCode() == 1062) throw new IllegalArgumentException("An account with that email already exists"); throw e; }
-        send(ex, 200, identityMap(currentIdentity(identity.userId())));
+        send(ex, 200, currentIdentity(identity.userId()));
     }
 
     private static void updateStore(HttpExchange ex, Identity identity) throws Exception {
@@ -216,7 +224,7 @@ public final class StockroomApplication {
         try (Connection c = connection(); PreparedStatement s = c.prepareStatement("UPDATE stores SET name=?,location=? WHERE id=?")) {
             s.setString(1, name); s.setString(2, location); s.setLong(3, identity.storeId()); s.executeUpdate();
         }
-        send(ex, 200, identityMap(currentIdentity(identity.userId())));
+        send(ex, 200, currentIdentity(identity.userId()));
     }
 
     private static Map<String,Object> currentIdentity(long userId) throws SQLException {
@@ -322,14 +330,84 @@ public final class StockroomApplication {
         Map<String,String> m=new HashMap<>();try(Connection c=connection();PreparedStatement s=c.prepareStatement("SELECT setting_key,setting_value FROM store_settings WHERE store_id=?")){s.setLong(1,storeId);try(ResultSet r=s.executeQuery()){while(r.next())m.put(r.getString(1),r.getString(2));}}m.putIfAbsent("lowStockThreshold","15");return m;
     }
     private static void updateSettings(HttpExchange ex,Identity identity)throws Exception{
-        JsonObject p=body(ex);try(Connection c=connection();PreparedStatement s=c.prepareStatement("INSERT INTO store_settings(store_id,setting_key,setting_value) VALUES(?,?,?) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)")){for(String key:List.of("lowStockThreshold")){if(p.has(key)){s.setLong(1,identity.storeId());s.setString(2,key);s.setString(3,p.get(key).getAsString());s.addBatch();}}s.executeBatch();}send(ex,200,readSettings(identity.storeId()));
+        JsonObject p=body(ex);if(p.has("lowStockThreshold")){int threshold;try{threshold=p.get("lowStockThreshold").getAsInt();}catch(RuntimeException e){throw new IllegalArgumentException("Low stock threshold must be a whole number between 1 and 500");}if(threshold<1||threshold>500)throw new IllegalArgumentException("Low stock threshold must be between 1 and 500");p.addProperty("lowStockThreshold",String.valueOf(threshold));}try(Connection c=connection();PreparedStatement s=c.prepareStatement("INSERT INTO store_settings(store_id,setting_key,setting_value) VALUES(?,?,?) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)")){for(String key:List.of("lowStockThreshold")){if(p.has(key)){s.setLong(1,identity.storeId());s.setString(2,key);s.setString(3,p.get(key).getAsString());s.addBatch();}}s.executeBatch();}send(ex,200,readSettings(identity.storeId()));
     }
 
-    private static String required(JsonObject p,String key,String message){if(!p.has(key)||p.get(key).isJsonNull()||p.get(key).getAsString().isBlank())throw new IllegalArgumentException(message);return p.get(key).getAsString();}
-    private static void servePage(HttpExchange ex)throws IOException{
-        String path=ex.getRequestURI().getPath();if(path.equals("/"))path="/index.html";if(path.contains("..")){send(ex,400,Map.of("error","Invalid path"));return;}
-        try(InputStream in=StockroomApplication.class.getResourceAsStream("/public"+path)){if(in==null){send(ex,404,Map.of("error","Page not found"));return;}byte[] data=in.readAllBytes();String type=path.endsWith(".js")?"text/javascript":path.endsWith(".css")?"text/css":path.endsWith(".svg")?"image/svg+xml":"text/html; charset=utf-8";ex.getResponseHeaders().set("Content-Type",type);ex.sendResponseHeaders(200,data.length);ex.getResponseBody().write(data);}finally{ex.close();}
+    private static Map<String,Object> readSales(long storeId)throws SQLException{
+        Map<String,Object> result=new LinkedHashMap<>();
+        try(Connection c=connection();PreparedStatement s=c.prepareStatement("SELECT COUNT(*),COALESCE(SUM(units),0),COALESCE(SUM(amount),0) FROM sales WHERE store_id=?")){s.setLong(1,storeId);try(ResultSet r=s.executeQuery()){r.next();result.put("count",r.getLong(1));result.put("units",r.getLong(2));result.put("revenue",r.getBigDecimal(3));}}
+        List<Map<String,Object>> recent=new ArrayList<>();
+        try(Connection c=connection();PreparedStatement s=c.prepareStatement("SELECT id,product_name,units,unit_price,amount,sold_at FROM sales WHERE store_id=? ORDER BY sold_at DESC,id DESC LIMIT 50")){s.setLong(1,storeId);try(ResultSet r=s.executeQuery()){while(r.next()){Map<String,Object> sale=new LinkedHashMap<>();sale.put("id",r.getLong("id"));sale.put("product",r.getString("product_name"));sale.put("units",r.getInt("units"));sale.put("unitPrice",r.getBigDecimal("unit_price"));sale.put("amount",r.getBigDecimal("amount"));sale.put("soldAt",r.getTimestamp("sold_at").toString());recent.add(sale);}}}
+        result.put("recent",recent);return result;
     }
+
+    private static void recordSale(HttpExchange ex,Identity identity)throws Exception{
+        JsonObject p=body(ex);if(!p.has("productId")||!p.has("units"))throw new IllegalArgumentException("Choose a product and sale quantity");
+        long productId=p.get("productId").getAsLong();int units=p.get("units").getAsInt();if(productId<=0||units<1||units>100000)throw new IllegalArgumentException("Enter a valid product and quantity");
+        try(Connection c=connection()){
+            c.setAutoCommit(false);
+            try(PreparedStatement product=c.prepareStatement("SELECT name,price,stock FROM products WHERE id=? AND store_id=? FOR UPDATE")){
+                product.setLong(1,productId);product.setLong(2,identity.storeId());
+                try(ResultSet r=product.executeQuery()){
+                    if(!r.next()){c.rollback();throw new IllegalArgumentException("Product not found in this store");}
+                    String name=r.getString("name");BigDecimal price=r.getBigDecimal("price");int stock=r.getInt("stock");
+                    if(units>stock){c.rollback();throw new IllegalArgumentException("Only "+stock+" units are currently in stock");}
+                    BigDecimal amount=price.multiply(BigDecimal.valueOf(units));
+                    try(PreparedStatement update=c.prepareStatement("UPDATE products SET stock=stock-? WHERE id=? AND store_id=?");PreparedStatement insert=c.prepareStatement("INSERT INTO sales(store_id,product_id,product_name,units,unit_price,amount) VALUES(?,?,?,?,?,?)")){
+                        update.setInt(1,units);update.setLong(2,productId);update.setLong(3,identity.storeId());update.executeUpdate();
+                        insert.setLong(1,identity.storeId());insert.setLong(2,productId);insert.setString(3,name);insert.setInt(4,units);insert.setBigDecimal(5,price);insert.setBigDecimal(6,amount);insert.executeUpdate();
+                    }
+                }
+            }
+            c.commit();
+        }
+        send(ex,201,readSales(identity.storeId()));
+    }
+
+    private static void recognizeExpiry(HttpExchange ex)throws Exception{
+        String type=ex.getRequestHeaders().getFirst("Content-Type");
+        if(type==null||!type.toLowerCase(Locale.ROOT).startsWith("multipart/form-data")||!type.contains("boundary="))throw new IllegalArgumentException("Upload a product label image to scan");
+        String boundary=type.substring(type.indexOf("boundary=")+9).trim();if(boundary.startsWith("\""))boundary=boundary.substring(1,boundary.length()-1);
+        byte[] raw;try(InputStream in=ex.getRequestBody()){raw=in.readNBytes(8*1024*1024+1);}
+        if(raw.length>8*1024*1024)throw new IllegalArgumentException("Choose an image smaller than 8 MB");
+        String payload=new String(raw,StandardCharsets.ISO_8859_1),delimiter="--"+boundary;byte[] image=null;
+        for(String part:payload.split(Pattern.quote(delimiter))){
+            int headersEnd=part.indexOf("\r\n\r\n");if(headersEnd<0||!part.substring(0,headersEnd).contains("name=\"image\""))continue;
+            int start=headersEnd+4,end=part.lastIndexOf("\r\n");if(end<start)continue;
+            image=part.substring(start,end).getBytes(StandardCharsets.ISO_8859_1);break;
+        }
+        if(image==null||image.length==0)throw new IllegalArgumentException("The uploaded image was empty");
+        Path file=Files.createTempFile("stockroom-label-",".img");
+        try{
+            Files.write(file,image);
+            Process process;
+            try{process=new ProcessBuilder("tesseract",file.toString(),"stdout","-l","eng","--psm","6").redirectErrorStream(true).start();}
+            catch(IOException e){throw new IllegalStateException("OCR is unavailable on this server",e);}
+            if(!process.waitFor(20,TimeUnit.SECONDS)){process.destroyForcibly();throw new IllegalArgumentException("The label scan took too long. Try a clearer photo");}
+            byte[] output;try(InputStream stream=process.getInputStream()){output=stream.readAllBytes();}
+            String recognized=new String(output,StandardCharsets.UTF_8);String date=extractExpiryDate(recognized);
+            Map<String,String> result=new LinkedHashMap<>();result.put("date",date);result.put("text",recognized.length()>600?recognized.substring(0,600):recognized);send(ex,200,result);
+        }finally{Files.deleteIfExists(file);}
+    }
+    private static String extractExpiryDate(String text){
+        Pattern[] patterns={
+                Pattern.compile("(?i)(?:EXP(?:IRY)?|BEST\\s*BEFORE|USE\\s*BY)\\D{0,16}(20\\d{2})[-/.](0?[1-9]|1[0-2])[-/.](0?[1-9]|[12]\\d|3[01])"),
+                Pattern.compile("(?i)(?:EXP(?:IRY)?|BEST\\s*BEFORE|USE\\s*BY)\\D{0,16}(0?[1-9]|[12]\\d|3[01])[-/.](0?[1-9]|1[0-2])[-/.](20\\d{2})"),
+                Pattern.compile("(?i)(?:EXP(?:IRY)?|BEST\\s*BEFORE|USE\\s*BY)\\D{0,16}(0?[1-9]|1[0-2])[-/.](20\\d{2})")
+        };
+        for(int i=0;i<patterns.length;i++){java.util.regex.Matcher m=patterns[i].matcher(text);if(!m.find())continue;try{
+            int year,month,day;if(i==0){year=Integer.parseInt(m.group(1));month=Integer.parseInt(m.group(2));day=Integer.parseInt(m.group(3));}else if(i==1){day=Integer.parseInt(m.group(1));month=Integer.parseInt(m.group(2));year=Integer.parseInt(m.group(3));}else{month=Integer.parseInt(m.group(1));year=Integer.parseInt(m.group(2));day=LocalDate.of(year,month,1).lengthOfMonth();}
+            return LocalDate.of(year,month,day).toString();
+        }catch(RuntimeException ignored){}}
+        return "";
+    }
+    private static void servePage(HttpExchange ex)throws IOException{
+        String path=ex.getRequestURI().getPath();
+        if(path.equals("/")||path.equals("/index.html")){sendHtml(ex,200,"<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Stockroom</title></head><body><div id=\"app\"></div><script src=\"/gwt/stockroom/stockroom.nocache.js\"></script></body></html>");return;}
+        if(path.contains("..")){send(ex,400,Map.of("error","Invalid path"));return;}
+        try(InputStream in=StockroomApplication.class.getResourceAsStream("/public"+path)){if(in==null){send(ex,404,Map.of("error","Page not found"));return;}byte[] data=in.readAllBytes();String type=path.endsWith(".js")?"text/javascript":path.endsWith(".css")?"text/css":path.endsWith(".svg")?"image/svg+xml":"application/octet-stream";ex.getResponseHeaders().set("Content-Type",type);ex.getResponseHeaders().set("Cache-Control",path.contains("nocache")?"no-cache":"public, max-age=31536000, immutable");ex.sendResponseHeaders(200,data.length);ex.getResponseBody().write(data);}finally{ex.close();}
+    }
+    private static void sendHtml(HttpExchange ex,int code,String page)throws IOException{byte[] bytes=page.getBytes(StandardCharsets.UTF_8);ex.getResponseHeaders().set("Content-Type","text/html; charset=utf-8");ex.getResponseHeaders().set("Cache-Control","no-store");ex.sendResponseHeaders(code,bytes.length);ex.getResponseBody().write(bytes);ex.close();}
     private static void send(HttpExchange ex,int code,Object payload)throws IOException{
         byte[] bytes=JSON.toJson(payload).getBytes(StandardCharsets.UTF_8);ex.getResponseHeaders().set("Content-Type","application/json; charset=utf-8");ex.getResponseHeaders().set("Cache-Control","no-store");ex.sendResponseHeaders(code,bytes.length);ex.getResponseBody().write(bytes);ex.close();
     }

@@ -272,9 +272,9 @@ public final class StockroomEntryPoint implements EntryPoint {
         if(!file){self.@com.stockroom.client.StockroomEntryPoint::finishOcrError(Ljava/lang/String;I)("Choose a label photo first.",requestId);return;}
         var data=new FormData();data.append("image",file,file.name);
         var xhr=new XMLHttpRequest();xhr.open("POST","/api/ocr/expiry",true);xhr.timeout=30000;
-        xhr.onload=function(){self.@com.stockroom.client.StockroomEntryPoint::finishOcrResponse(Ljava/lang/String;II)(xhr.responseText||"",xhr.status,requestId);};
-        xhr.onerror=function(){self.@com.stockroom.client.StockroomEntryPoint::finishOcrError(Ljava/lang/String;I)("Could not reach the expiry scanner. Check your connection and try again.",requestId);};
-        xhr.ontimeout=function(){self.@com.stockroom.client.StockroomEntryPoint::finishOcrError(Ljava/lang/String;I)("The scan took too long. Try a smaller photo or enter the date manually.",requestId);};
+        xhr.onload=$entry(function(){self.@com.stockroom.client.StockroomEntryPoint::finishOcrResponse(Ljava/lang/String;II)(xhr.responseText||"",xhr.status,requestId);});
+        xhr.onerror=$entry(function(){self.@com.stockroom.client.StockroomEntryPoint::finishOcrError(Ljava/lang/String;I)("Could not reach the expiry scanner. Check your connection and try again.",requestId);});
+        xhr.ontimeout=$entry(function(){self.@com.stockroom.client.StockroomEntryPoint::finishOcrError(Ljava/lang/String;I)("The scan took too long. Try a smaller photo or enter the date manually.",requestId);});
         xhr.send(data);
     }-*/;
     private void finishOcrResponse(String response,int statusCode,int requestId){if(requestId!=ocrRequestId)return;finishOcrRequest();String detected=extractOcrDate(response),error=extractOcrError(response);if(statusCode>=200&&statusCode<300&&!detected.isEmpty()){ocrExpiryInput.setValue(detected);ocrScanStatus.setText("Date detected. Review it before saving.");toast("Detected expiry date: "+detected+" — please review it.");return;}if(!error.isEmpty()&&!(statusCode>=200&&statusCode<300)){ocrScanStatus.setText(error);toast(error);return;}String readable="";try{JSONObject body=JSONParser.parseStrict(cleanOcrResponse(response)).isObject();if(body!=null)readable=text(body,"text","");}catch(Exception ignored){}ocrScanStatus.setText(readable.isEmpty()?"Could not identify an expiry date. Try a closer photo with EXP / Use by visible, or enter the date manually.":"Label read: "+readable+" — expiry date not recognized. Enter it manually.");}

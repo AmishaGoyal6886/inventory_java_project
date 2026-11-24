@@ -3,3 +3,8 @@
 target
 *.bat
 README.md
+.mvn-temp
+.m2repo
+.jdk-temp
+maven-temp.zip
+publish_checkout
